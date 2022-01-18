@@ -1,0 +1,561 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+    <id>https://www.wangyongblog.tech</id>
+    <title>呓语</title>
+    <updated>2022-01-18T03:07:33.209Z</updated>
+    <generator>https://github.com/jpmonette/feed</generator>
+    <link rel="alternate" href="https://www.wangyongblog.tech"/>
+    <link rel="self" href="https://www.wangyongblog.tech/atom.xml"/>
+    <subtitle>醉后不知天在水，满船清梦压星河</subtitle>
+    <logo>https://www.wangyongblog.tech/images/avatar.png</logo>
+    <icon>https://www.wangyongblog.tech/favicon.ico</icon>
+    <rights>All rights reserved 2022, 呓语</rights>
+    <entry>
+        <title type="html"><![CDATA[adonisjs 源码分析]]></title>
+        <id>https://www.wangyongblog.tech/post/adonisjs-yuan-ma-fen-xi/</id>
+        <link href="https://www.wangyongblog.tech/post/adonisjs-yuan-ma-fen-xi/">
+        </link>
+        <updated>2022-01-18T02:59:25.000Z</updated>
+        <content type="html"><![CDATA[<h1 id="adonisjs源码分析">adonisjs源码分析</h1>
+<h2 id="server启动过程分析">server启动过程分析</h2>
+<p>基础模块</p>
+<ol>
+<li>core 核心模块，处理命令 ，查看app状态</li>
+<li>httpserver http服务模块，负责与子进程的通讯</li>
+<li>assember 官方的命令实现，如server等，</li>
+<li>application 实际运行的应用，ioc挂载在上面，application.container</li>
+</ol>
+<p>node ace serve 命令调用流程</p>
+<p>先初始化一个core.ignitor对象</p>
+<p>在core.kenel里面处理声明文件(manifest.json)，然后加载command对象，</p>
+<p>然后开始启动application，这里具体的分析放到下面，启动完application之后会执行命令</p>
+<p>server 命令会初始化一个assembler下的httpServer ，</p>
+<pre><code class="language-tsx">new DevServer().start()
+// 声明了一个httpServer 
+this.httpServer = new HttpServer.HttpServer()
+this.httpServer.start() // 这里主要用于接收子进程的消息
+</code></pre>
+<p>start里面会拉起一个子进程 ，用于启动http服务</p>
+<pre><code class="language-tsx">// 这里是子进程执行server.ts 并且预加载register, 注册了 实例
+this.childProcess = execa.node('server.ts', [], {
+      buffer: false,
+      stdio: 'inherit',
+      cwd: this.projectRoot,
+      env: {
+        FORCE_COLOR: 'true',
+        ...this.env,
+      },
+      nodeOptions: ['-r', '@adonisjs/assembler/build/register'].concat(this.nodeArgs),
+    })
+// server.ts
+new Ignitor(__dirname).httpServer().start()
+// start
+this.createServer(serverCallback)
+this.monitorHttpServer()
+await this.listen()
+//  createServer 
+import {createServer} from 'http'
+const handler = this.server.handle.bind(this.server)
+this.server.instance = createServer(handler)
+// listen instance就是官方库的http
+this.application.start()
+this.server.instance.listen()
+
+</code></pre>
+<p>从子进程拿到消息后 打印启动成功</p>
+<pre><code class="language-tsx">this.childProcess.on('message', (message) =&gt; {
+            if (message &amp;&amp; message['origin'] === 'adonis-http-server') {
+                this.emit('ready', message);
+            }
+        });
+</code></pre>
+<h2 id="application启动过程分析">application启动过程分析</h2>
+<p>在constructor中先声明了rcfile, 即 .adonisjsrc.json， 声明了预加载文件和providers (这里也是ioc不过是外部包的注入)，并且设置环境变量，全局ioc属性，吧application注册到ioc，注册好helper</p>
+<p>目前主要预加载  全局中间件和路由</p>
+<p>app 启动流程  内部维护了一个 state</p>
+<p>流转过程为</p>
+<p>initiated 初始化</p>
+<p>⇒ setup  加载配置 环境变量 注册 logger等</p>
+<p>⇒ registered  加入providers</p>
+<p>⇒ booted 启动provider</p>
+<p>⇒ 加载预加载文件</p>
+<p>⇒ ready 启动成功</p>
+<p>处理命令时会调用wire, 实际代码如下，这里就是app的流转过程</p>
+<pre><code class="language-tsx">await this.application.setup();
+await this.application.registerProviders();
+await this.application.bootProviders();
+await this.application.requirePreloads();
+// requirePreloads
+this.resolveModule(node.file)
+// resolveModule
+require(path)
+</code></pre>
+<h2 id="请求生命周期">请求生命周期</h2>
+<p>实际最后处理逻辑在 http-server/server/index 下的handle 函数 handle 是通用函数，可以用在其它的httpServer里面</p>
+<p>可以看到每一次请求都是一个新的context对象</p>
+<pre><code class="language-tsx">// request初始化主要做了参数解析
+const request = new Request.Request(req, res, this.encryption, this.httpConfig);
+const response = new Response.Response(req, res, this.encryption, this.httpConfig, this.router);
+// 这里做个一个请求观察器
+const requestAction = this.getProfilerRow(request);
+const ctx = this.getContext(request, response, requestAction);
+// getContext 可以看到每一个request都是带了id的
+getContext(request, response, profilerRow) {
+        return new HttpContext.HttpContext(request, response, this.application.logger.child({
+            request_id: request.id(),
+        }), profilerRow);
+    }
+this.handleRequest(ctx, requestAction, res)
+// handleRequest 
+await this.runBeforeHooksAndHandler(ctx);
+await this.hooks.executeAfter(ctx);
+requestAction.end({ status_code: res.statusCode });
+ctx.response.finish();
+</code></pre>
+<p>实际上处理请求分两个函数，before 和after，</p>
+<p>before函数 先执行before的hook函数</p>
+<pre><code class="language-tsx">// 先执行before hooks
+return this.hooks.executeBefore(ctx).then((shortcircuit) =&gt; {
+            if (!shortcircuit) {
+                return this.requestHandler.handle(ctx);
+            }
+});
+</code></pre>
+<p>然后找到请求的对应处理路由，加载中间件，将最后处理函数放到最后，然后开始执行中间件</p>
+<pre><code class="language-tsx">
+// 然后实际处理开始 这里的middlware都是从ioc容器中取出来
+this.requestHandler =  new RequestHandler(this.middleware, this.router)
+// requestHandler
+async handle(ctx) {
+				// 这里对路由进行匹配，写入参数 
+        this.findRoute(ctx);
+        return this.handleRequest(ctx);
+}
+// handleRequest 
+this.globalMiddleware = new co_compose.Middleware().register(middleware);
+        this.handleRequest = (ctx) =&gt; {
+            return this.globalMiddleware
+                .runner()
+                .executor(this.executeMiddleware)
+                .finalHandler(ctx.route.meta.finalHandler, [ctx])
+                .run([ctx]);
+}
+</code></pre>
+<p>中间件的run函数执行, 实现的灰常优雅，在内部实现了队列，调用next之后，会等待后面的所有中间件执行完毕，完成了洋葱模型</p>
+<pre><code class="language-tsx">// run 函数 
+private invoke() {
+    const fn = this.list[this.index++]
+    if (!fn) {
+      return this.registeredFinalHandler.fn(...this.registeredFinalHandler.args)
+    }
+    return this.executorFn(fn, this.params)
+ }
+// 这里写的很好，简洁而又有效，
+// next 函数就是这里的invoke 动态调用下一个函数
+// run 函数
+this.params = params.concat(this.invoke.bind(this))
+return this.invoke()
+</code></pre>
+<p>再来看看executeAfter ,和before里面类似</p>
+<pre><code class="language-tsx">for (let hook of this.hooks.after) {
+    await hook(ctx);
+}
+</code></pre>
+<h2 id="ioc处理">ioc处理</h2>
+<p>先看如何注入</p>
+<p>使用了@inject的类 他的constructor都会被写入inject 属性，</p>
+<pre><code class="language-tsx">if (!target.constructor.hasOwnProperty('inject')) {
+            Object.defineProperty(target.constructor, 'inject', {
+                value: {},
+            });
+        }
+target.constructor.inject[propertyKey] = target.constructor.inject[propertyKey] || [];
+</code></pre>
+<p>以route中的函数依赖注入为代表</p>
+<pre><code class="language-tsx">// 这里的handler实际上是一个string，
+Route.post('/login', 'AuthController.login') 
+// 这里在路由提交完之后，调用了optimize函数，其中compileHandler 这里将实际处理函数替换
+compileHandler(route) {
+			this.resolver = container.getResolver(undefined, 'httpControllers', 'App/Controllers/Http');
+      route.meta.resolvedHandler = this.resolver.resolve(route.handler, route.meta.namespace);
+}
+// 这里将router的resolvedHandler 注册好了之后，去找真正的处理函数
+{
+	type: 'alias',
+	method: 'get',
+	namespace: 'App/Controllers/Http/ProductController',
+}
+this.runRouteHandler = async (ctx) =&gt; {
+            const routeHandler = ctx.route.meta.resolvedHandler;
+             await this.resolver.call(routeHandler, undefined, [ctx]);
+};
+// 核心在于 这里的call
+// routeHandler {type: 'alias', namespace: 'App/Controllers/Http/ProductController', method: 'list'}
+// 这里实际上 是先makeAsync 实例化这个对象然后在调用 callSync, 最后是这个方法和参数
+public async call(
+    namespace: string | IocResolverLookupNode&lt;string&gt;,
+    prefixNamespace?: string,
+    args?: any[]
+  ): Promise&lt;any&gt; {
+    const lookupNode =
+      typeof namespace === 'string' ? this.resolve(namespace, prefixNamespace) : namespace
+    return this.container.callAsync(
+      await this.container.makeAsync(lookupNode.namespace),
+      lookupNode.method,
+      args
+    )
+  }
+// makeAsync 这里实际上就是执行了
+async makeAsync(target, method, args) {
+	return await target[method](args)
+}
+require(path)
+// makeAsync 这里直接new这个对象，并且把依赖注入进去
+return new target(...(await this.resolveAsync(target.name, this.getInjections(target, 'instance'), runtimeValues)))
+// getInjections 直接判断这个对象是否有inject prop是instance
+return target.constructor.hasOwnProperty('inject') ? target.inject[prop] || [] : [];
+// resolveAsync 这里是一个递归调用
+return Promise.all(injections.map((injection, index) =&gt; {return this.container.makeAsync(injection);}));
+</code></pre>
+<h2 id="adonisjs模块的ioc怎么做的">adonisjs模块的ioc怎么做的</h2>
+<p>在上面的启动中 会先预加载  @adonisjs/assembler/build/register，</p>
+<p>然后会调用adonisjs/require-ts包, 在adonisjs/application 中启动的时候会注册</p>
+<pre><code class="language-tsx">global[Symbol.for('ioc.use')] = this.container.use.bind(this.container);
+global[Symbol.for('ioc.make')] = this.container.make.bind(this.container);
+global[Symbol.for('ioc.call')] = this.container.call.bind(this.container);
+</code></pre>
+<p>然后在compile中注册一个require的hook， 然后通过adonisjs/ioc-transformer会将代码的require修改</p>
+<pre><code class="language-tsx">import Encryption from '@ioc:Adonis/Core/Encryption' 
+// 转化如下 然后 gloabal 是在app生命周期里面的registerGlobal中修改的
+require(global['ioc.use']('Adonis/Core/Encryption'))
+</code></pre>
+<p>性能优化问题</p>
+<p>在上面启动过程中 会执行</p>
+<pre><code class="language-tsx">this.server.optimize();
+// server 是由adonisjs/http-server注入
+this.server = this.application.container.use('Adonis/Core/Server')
+</code></pre>
+<p>最后实际的optimize代码</p>
+<pre><code class="language-tsx">/**
+     * Optimizes internal handlers, based upon the existence of
+     * before handlers and global middleware. This helps in
+     * increasing throughput by 10%
+     */
+    optimize() {
+        this.router.commit();
+        this.hooks.commit();
+        this.requestHandler.commit();
+    }
+</code></pre>
+<ul class="contains-task-list">
+<li class="task-list-item"><input class="task-list-item-checkbox" checked="" disabled="" type="checkbox" id="task-item-1564217"><label class="task-list-item-label" for="task-item-1564217">  rabbitmq 订阅实现</label></li>
+<li class="task-list-item"><input class="task-list-item-checkbox" checked="" disabled="" type="checkbox" id="task-item-4612300"><label class="task-list-item-label" for="task-item-4612300">  application生命周期 流程图</label></li>
+</ul>
+<figure data-type="image" tabindex="1"><img src="https://www.wangyongblog.tech/post-images/1642474856464.png" alt="" loading="lazy"></figure>
+<p>链接 <a href="http://assets.processon.com/chart_image/61bdc70b1e08534302e9addd.png">http://assets.processon.com/chart_image/61bdc70b1e08534302e9addd.png</a></p>
+<ul class="contains-task-list">
+<li class="task-list-item"><input class="task-list-item-checkbox" checked="" disabled="" type="checkbox" id="task-item-5901088"><label class="task-list-item-label" for="task-item-5901088">  ioc和middleware 时序图 类关系</label></li>
+</ul>
+<figure data-type="image" tabindex="2"><img src="https://www.wangyongblog.tech/post-images/1642474874953.png" alt="" loading="lazy"></figure>
+<p>链接 <a href="http://assets.processon.com/chart_image/61bdce8a1efad41dea251ac1.png">http://assets.processon.com/chart_image/61bdce8a1efad41dea251ac1.png</a></p>
+<p>adonisjs 启动类加载顺序</p>
+<p>链接 <a href="http://assets.processon.com/chart_image/61bf1f026376892b1df6547f.png">http://assets.processon.com/chart_image/61bf1f026376892b1df6547f.png</a></p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[i18n国际化踩坑之旅]]></title>
+        <id>https://www.wangyongblog.tech/post/i18n-guo-ji-hua-cai-keng-zhi-lu/</id>
+        <link href="https://www.wangyongblog.tech/post/i18n-guo-ji-hua-cai-keng-zhi-lu/">
+        </link>
+        <updated>2021-10-08T10:14:42.000Z</updated>
+        <content type="html"><![CDATA[<!-- more -->
+<p>本来我们后台用的是 midwayjs, 然后想做国际化，一开始选的技术方案是 i18next, i18n这样的框架，大佬推荐用kiwi，然后苦逼的开始使用kiwi了</p>
+<p>目前这个项目已经不活跃了，kiwi 对应的vscode插件已经无法使用，难顶，<br>
+kiwi-intl这个项目应该是可以正常使用，为了可以一键提取文本，要使用他的kiwi-cli</p>
+<p>kiwi-cli --extract需要使用谷歌翻译的apiKey，迫于没有，只能基于他魔改一份<br>
+改完发现，翻译并没有什么暖用，哈哈，还不如不用翻译，</p>
+<p>修改思路<br>
+kiwi 之前的思路是将文件中的文本全部提取出来，然后获取中文文本，将其逐字翻译，</p>
+<p>比如 圆通快递 翻译对应的是 圆 circle 通 through 这样的，然后取前四个字母，生成key</p>
+<p>我直接去掉这一步哈，直接用uuid生成key了，然后翻译也有一点小问题</p>
+<p>魔改好的版本叫 wy-kiwi-cli</p>
+<pre><code>npm i -g wy-kiwi-cli
+</code></pre>
+<p>部署过程</p>
+<pre><code>1. kiwi --init 先生成配置文件，修改.kiwi/kiwi-config.json 吧百度翻译相关的apikey 填一下
+2. kiwi --extract ${dir}  针对目录提取中文文件，${dir} 为提取的目录
+3. kiwi --sync 同步生成多语言配置文件
+4. kiwi --translate 进行翻译
+</code></pre>
+<p>生成的数据如果有模板字符串的话，会有一点小问题，<br>
+比如</p>
+<pre><code>a = `这是一条模板字符串 ${text}`
+</code></pre>
+<p>当被提取时，text变量会被转义成{val}, 需要自行处理，如果使用kiwi 对应的包， 代码如下</p>
+<pre><code>kiwi.template('字符串对应地址', { text: '这里你要换的变量'})
+</code></pre>
+<p>PS. 可以修改config里面的 importI18N 字段，改成绝对目录 比如 @/app/util/i18n 这样就不用修改代码了，怎么修改绝对导入 https://khalilstemmler.com/blogs/typescript/absolute-file-path/<br>
+绝对路径的问题，<br>
+只改tsconfig.json 会报 cannot find module<br>
+在网上找了一下解决方案，尝试无果，发现是 midway的问题😆 https://blog.csdn.net/qq_37365676/article/details/113884986</p>
+<!-- more -->
+<p>fuck， 只能使用 tsconfig-paths</p>
+<pre><code>npm i -save-dev tsconfig-paths
+</code></pre>
+<p>然后在启动时，加上</p>
+<pre><code>import 'tsconfig-paths/register'
+</code></pre>
+<p>就好了</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[docker 安装wordpress]]></title>
+        <id>https://www.wangyongblog.tech/post/docker-an-zhuang-wordpress/</id>
+        <link href="https://www.wangyongblog.tech/post/docker-an-zhuang-wordpress/">
+        </link>
+        <updated>2021-08-20T02:33:05.000Z</updated>
+        <content type="html"><![CDATA[<p>首先安装docker</p>
+<pre><code class="language-bash">curl -fsSL https://get.docker.com | bash -s docker --mirror Aliyun
+</code></pre>
+<p>然后安装docker-compose</p>
+<pre><code class="language-bash">apt install docker-compose
+</code></pre>
+<p>然后编辑docker-compose.yml</p>
+<pre><code class="language-yml">version: '3.3'
+services:
+   db:
+     image: mysql:5.7
+     volumes:
+       - /root/mysql-data:/var/lib/mysql
+     restart: always
+     environment:
+       MYSQL_ROOT_PASSWORD: somewordpress
+       MYSQL_DATABASE: wordpress
+       MYSQL_USER: wordpress
+       MYSQL_PASSWORD: wordpress
+   wordpress:
+     depends_on:
+       - db
+     image: wordpress:latest
+     ports:
+       - &quot;3000:80&quot;
+     restart: always
+     environment:
+       WORDPRESS_DB_HOST: db:3306
+       WORDPRESS_DB_USER: wordpress
+       WORDPRESS_DB_PASSWORD: wordpress
+       WORDPRESS_DB_NAME: wordpress
+</code></pre>
+<p>定义好自己的对外端口，然后 访问 http://ip:{端口} 就好了</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[elasticsearch 和mongodb 同步踩坑之旅]]></title>
+        <id>https://www.wangyongblog.tech/post/elasticsearch-he-mongodb-tong-bu-cai-keng-zhi-lu/</id>
+        <link href="https://www.wangyongblog.tech/post/elasticsearch-he-mongodb-tong-bu-cai-keng-zhi-lu/">
+        </link>
+        <updated>2021-08-18T07:26:28.000Z</updated>
+        <content type="html"><![CDATA[<p>同步数据目前看有两种方式</p>
+<ol>
+<li>在mongodb 的操作后加入 对es 的同步，</li>
+<li>读取mongodb的 oplog然后间接同步数据</li>
+</ol>
+<p>第一种 目前 有两种思路，1是在代码里面修改逻辑，加入对es的同步，第二种 就是 使用Mongose的插件，比如这个<a href="https://github.com/mongoosastic/mongoosastic">mongoosastic</a> 不过作者已经不维护了，在找人维护，我没具体试过<br>
+第二种 查出来，有几个工具 ，<br>
+a. mongo-connector  可以将mongo的数据向多种数据库同步，比如 es ，mysql， influxdb等，但是也比较老了，据说还有很多坑<br>
+b. <a href="https://github.com/iftech-engineering/mongo-es">mongo-es</a> 国内一个公司出品，只能 mongo向es同步<br>
+具体对比可以看看<a href="https://zhuanlan.zhihu.com/p/26906652">这篇文章</a></p>
+<h3 id="正文开始了">正文开始了，</h3>
+<p>先看mongo-es的官方文档，除开 es和mongo的连接配置不谈， 主题还是对 task的配置</p>
+<p>task主要是每个collection对应的数据如何存储到es<br>
+from 配置</p>
+<ul>
+<li>phase [scan, tail] scan是全量更新，tail是 从设置的时间开始更新</li>
+<li>time 上述配置的时间</li>
+<li>id scan时 从哪条id开始</li>
+</ul>
+<p>extract</p>
+<ul>
+<li>db 数据库名称</li>
+<li>collection</li>
+<li>project 筛选条件</li>
+</ul>
+<p>transform</p>
+<ul>
+<li>mapping mongo字段和es字段的映射关系</li>
+<li>parent 指定es的 _parent字段</li>
+</ul>
+<p>load</p>
+<ul>
+<li>index 指定index名称</li>
+<li>type</li>
+<li>body 指定es的字段类型 如果是列表 指明为object</li>
+</ul>
+<p>第一个坑来了， load里面的body字段， 实际上定义的是es的mapping属性，如果这里配置不好，可能会导致es 搜索不出来数据，</p>
+<pre><code class="language-json">{
+    &quot;load&quot;:{
+        &quot;body&quot;:{
+            &quot;dynamic&quot;: true
+        }
+    }
+}
+</code></pre>
+<p>这里的dynamic 一定要填true， 它实际上定义的是 es里面的文档字段是否可以被索引，如果是false，那么 使用了条件的es查询将查不出来数据<br>
+第二呢，mongodb里面的字段 和es的字段一定要一一对应才能同步，这样确实不错，但是懒癌发作，吧这个项目clone 下来，自己改了一波 ，直接同步所有字段<br>
+项目发布之后 叫 wy-mongo-es</p>
+<p>第三，由于上面的魔改了，导致出现了一些小bug，比如mongodb update字段无法同步的问题， 这边我都在魔改的项目里面修复了</p>
+<p>第四，任务全量复制时，指定id 也无法全量同步数据的问题， 仔细研究了一波，伪代码大概是这样的</p>
+<pre><code class="language-javascript">    db.collection().find({_id: {
+        gte: new ObjectID(id)
+    }})
+</code></pre>
+<p>如果你的表里面的id 不是objecid，这里会导致无法查询到数据--，这就很尴尬了，我改成直接用string了， 当然也发布到 魔改项目里面了。</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[2021年的第一篇文章]]></title>
+        <id>https://www.wangyongblog.tech/post/2021-nian-de-di-yi-pian-wen-zhang/</id>
+        <link href="https://www.wangyongblog.tech/post/2021-nian-de-di-yi-pian-wen-zhang/">
+        </link>
+        <updated>2021-01-12T12:18:53.000Z</updated>
+        <content type="html"><![CDATA[<p>最近看了一篇 文章，讲的 一部分技术<a href="https://mp.weixin.qq.com/s/slixIZYFc1FpmE-QsYAgKw">连接</a>创业的思路，我呢 就想顺着这个思路做一下看看, 做不成也没关系，就当是练练手，顺便也学习了一下nestjs相关的内容，说实话和 spring 那一套应该很接近。<br>
+总体来说 ，人还是处于一个非常焦虑的状态，晚上老是不舍得睡觉，右眼皮一直跳，应该是没休息好的原因。</p>
+<p>具体要做的方向 大致就是学习一波seo ，整理现有知识，做一次整体对外的输出。</p>
+<p>然后，经常写写博客，做做笔记，多多学习。</p>
+<p>最后，有点理解，个人魅力的重要性了，同时，过于自私的人走不长远。</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[自私的人路不远]]></title>
+        <id>https://www.wangyongblog.tech/post/zi-si-de-ren-lu-bu-yuan/</id>
+        <link href="https://www.wangyongblog.tech/post/zi-si-de-ren-lu-bu-yuan/">
+        </link>
+        <updated>2021-01-12T12:18:53.000Z</updated>
+        <content type="html"><![CDATA[<p>最近看了一篇 文章，讲的 一部分技术<a href="https://mp.weixin.qq.com/s/slixIZYFc1FpmE-QsYAgKw">连接</a>创业的思路，我呢 就想顺着这个思路做一下看看, 做不成也没关系，就当是练练手，顺便也学习了一下nestjs相关的内容，说实话和 spring 那一套应该很接近。<br>
+总体来说 ，人还是处于一个非常焦虑的状态，晚上老是不舍得睡觉，右眼皮一直跳，应该是没休息好的原因。</p>
+<p>具体要做的方向 大致就是学习一波seo ，整理现有知识，做一次整体对外的输出。</p>
+<p>然后，经常写写博客，做做笔记，多多学习。</p>
+<p>最后，有点理解，个人魅力的重要性了，同时，过于自私的人走不长远。</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[2020年度总结]]></title>
+        <id>https://www.wangyongblog.tech/post/2020-nian-du-zong-jie/</id>
+        <link href="https://www.wangyongblog.tech/post/2020-nian-du-zong-jie/">
+        </link>
+        <updated>2021-01-03T06:28:22.000Z</updated>
+        <content type="html"><![CDATA[<p>一年又过去了，总感觉这一年过去的飞快。时光如白驹过隙，一马平川，生活一泻而下，我就像一块石头，在浪潮中被击打，又像一个局外人，冷眼旁观。<br>
+这一年最大的改变就是 到泉州工作了，生活和工作的改变，促使我自己去思考，去修正，去探索自己的方向。<br>
+年初疫情，上家公司 区区小果，倒闭之后，田总接盘技术部，并且邀请我们去泉州发展的时候，当时我还没想到接下来会是这样，最有趣的事情是， 第一次去的时候是 准备讨论 是否来泉州工作的问题，可是一到就感觉已经答应了的样子。然后之后事情的发展就超出了预期，本来是准备远程工作的，可是一到泉州，就tm莫名其妙的开始本地上班了，然后开始了两地分居 。<br>
+3月份刚到泉州的时候，特别忙，住在郊区，也基本没放过假，这种高强度的工作一直持续到7月份左右，其中小冷五月份左右到泉州，茶叶蛋一直在这边。<br>
+到了七月份左右，公司业务基本形态固定，然后探讨跑路相关事宜，现在想想，当时应该是波神承受了很大的来自女朋友的压力，所以没办法。然后十一过后事情暂缺搁置。<br>
+到目前为止，2020年已经过完，除了工资啥也没拿到，目测也没有年终奖，准备年后就不来泉州了。<br>
+个人总结：</p>
+<ol>
+<li>技术上成长了一部分，对系统整体的设计和把控能力提升了。</li>
+<li>对项目进度的编排和人员的管理，有了初步的学习。</li>
+<li>对公司的流程，大项目的架构 有了初步的理解，一个公司，就是怎么使用不可靠的人搭建可靠的系统（最近看了一篇技术博客<a href="https://icyfenix.cn/introduction/about-the-fenix-project.html">The Fenix Project</a>）</li>
+<li>最后就是个人思想上的成长，我感觉就是质的变化，或者说年纪到了，就懂了，尝遍人生百态，自然就明白辛酸苦辣了。</li>
+</ol>
+<p>然后呢就是2021的目标：</p>
+<ol>
+<li>攒钱在深圳买房吧</li>
+<li>技术上有一定的成长</li>
+<li>寻找副业，给自己一个坚实的物质基础</li>
+</ol>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[ddia 学习笔记（1）]]></title>
+        <id>https://www.wangyongblog.tech/post/ddia-xue-xi-bi-ji-1/</id>
+        <link href="https://www.wangyongblog.tech/post/ddia-xue-xi-bi-ji-1/">
+        </link>
+        <updated>2020-12-28T08:26:58.000Z</updated>
+        <content type="html"><![CDATA[<ol>
+<li>
+<p>持久型数据库（mysql) 为啥会比非 持久型数据库（redis）更快？</p>
+<p>这个东西是反直觉的，一般人正常来想，从内存里面读数据肯定比从磁盘里面读数据 要更快， 但是 mysql 也有可能 出现 读取的数据 缓存在内存中的情况，那为啥mysql 仍然还是要比 redis慢呢？<br>
+实际上，除开 读取磁盘的区别，更大的区别，redis 不需要 将 内存中的数据结构 编码(encode)为硬盘数据结构，不过现在 redis 也可以异步持久化，</p>
+</li>
+<li>
+<p>OLAP 和 OLTP的区别</p>
+<p>实际上这个很简单， OL 是 online 的意思,  tp 是 transaction process (事务处理), ap 是 analytical process (分析处理)， 简单的说OLAP用于数据仓库 数据分析等， OLTP就是正常事务处理，</p>
+</li>
+<li>
+<p>数据库的复制</p>
+<p>复制有很多种策略， 最简单的<br>
+a. 同步复制（性能最差）</p>
+<p>一条数据插入之后， 所有的从库 都要复制完成之后才算完成， 这个出现网络错误等问题之后，很容易崩溃，一般不建议</p>
+<p>b. 异步复制</p>
+<p>主库先插入数据，从库异步完成操作，<br>
+如果插入之后立刻读取可能会出现 读取不到最新数据的问题，（修复策略是 读取时 指定读主库）</p>
+</li>
+<li>
+<p>分区</p>
+<p>分区 一般是和复制 在一起， 即 既有 复制又有 分区，<br>
+分区是将表 分块， 分开存储， 分开有多种策略，<br>
+一般就是按 id的hash 分区 取 前两位 按照  36进制取值 然后根据分块 取值落点就行了，<br>
+用hash 取值分区呢，好处在于 ，均匀，不会出现 大量 热点数据 居中在一个分区上的情况，缺点在于 失去了数据的连续性，范围查询会变得麻烦，（ 解决方案呢：建立索引）<br>
+为什么不用 hash值除以分区数 取余数呢，即mod方案， 因为重新分区的情况， 分区数据可能会出现移动，原本是 1号分区的数据 可能变为了2号，大量数据都会移动，正常情况了 用hash 取值就够了</p>
+</li>
+<li>
+<p>事务</p>
+<p>事务关键词 ACID,  atomic ，consistency ， isolation， durability ，实际上类似 REST规范，你并不能通过 一个 数据库声明他是一个ACID数据 库，来预测他的行为，目前 还是以mysql为规范。<br>
+脏读 ：读到了未提交的数据<br>
+脏写： 两个事务同时提交的问题，覆盖写入<br>
+读已提交：mysql实现方式是， 如果事务未提交，读到旧数据，提交了 读新数据，</p>
+</li>
+</ol>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[文档数据库和关系型数据库的关系]]></title>
+        <id>https://www.wangyongblog.tech/post/wen-dang-shu-ju-ku-he-guan-xi-xing-shu-ju-ku-de-guan-xi/</id>
+        <link href="https://www.wangyongblog.tech/post/wen-dang-shu-ju-ku-he-guan-xi-xing-shu-ju-ku-de-guan-xi/">
+        </link>
+        <updated>2020-10-28T08:43:05.000Z</updated>
+        <content type="html"><![CDATA[<p>文档数据库一般 以MongoDB 为代表，关系型一般是MySQL, 那么这两种数据库的区别在哪里呢。</p>
+<p>性能，<br>
+一般情况下，mongodb 略好于mysql, 实际上，mongodb 的策略 是 多占用内存，导致他可以性能优于mysql,<br>
+存储<br>
+mysql的数据存储方式决定了，会有大量的空值，所以，mysql 大于mongodb<br>
+使用<br>
+一般情况下，如果数据需要连表查询，就使用 mysql,  不需要就直接 MongoDB了。</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[node.js 内存泄漏分析 ]]></title>
+        <id>https://www.wangyongblog.tech/post/nodejs-nei-cun-xie-lou-fen-xi/</id>
+        <link href="https://www.wangyongblog.tech/post/nodejs-nei-cun-xie-lou-fen-xi/">
+        </link>
+        <updated>2020-10-11T07:55:42.000Z</updated>
+        <content type="html"><![CDATA[<p>最近图片服务器 内存占用飙涨 ，从之前的100Mb左右 两天之后就会涨到 1.7gb左右，应该是内存泄漏了，现在来看看为啥</p>
+<ol>
+<li>工具<br>
+heapdump  node.js 内存分析包<br>
+chrome 用于分析 dump下来的文件</li>
+<li>搞起来<br>
+先在代码中 引用<pre><code class="language-javascript">const heapdump = require('heapdump')
+</code></pre>
+</li>
+<li>运行 node bin/www</li>
+<li>找到这个进程的pid<br>
+pgrep node</li>
+<li>kill -USR2 pid 正常情况下 直接kill 这个进程会杀死这个进程，但是导入heapdump这个包之后就不会，在生产环境这个命令也可以使用  然后在当前目录就会生成 heapshot文件 了，</li>
+<li>打开chrome 打开开发者工具 -&gt; 点击memory <img src="https://www.wangyongblog.tech/post-images/1602404690303.jpg" alt="" loading="lazy"> 右键 load 把生产的heapshot 导入进来就可以看到内存占用了</li>
+<li>这里推荐 生产2到3个heapshot文件 ，然后分析工具 有几种可以选择
+<ol>
+<li>summay  总体查看内存分布 这里分析内存泄漏 没啥用</li>
+<li>comparision 前后对比  主要使用这个</li>
+<li>containment</li>
+<li>statis</li>
+</ol>
+</li>
+<li>点击 comparision 之后  点击 最右边的size delta 按降序排列 可以查看变更内存差异最大的<br>
+<img src="https://www.wangyongblog.tech/post-images/1602404984788.jpg" alt="" loading="lazy"><br>
+以目前我这个举例，bitwiseTo 这个方法引用了相当多的内存，应该是闭包 引用没释放的原因<br>
+经过查看代码 ，预计是canvas这个库 调用这个方法导致的</li>
+</ol>
+]]></content>
+    </entry>
+</feed>
